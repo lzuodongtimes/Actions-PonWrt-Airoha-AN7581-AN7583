@@ -40,8 +40,9 @@ jobs:
           echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
 
           if [ "$SHOULD_BUILD" = "true" ]; then
-            git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
-            CONFIG_LIST=$(find ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            git clone --depth=1 https://github.com/pbs05/ponwrt.git /tmp/check-ponwrt
+            CONFIG_LIST=$(find /tmp/check-ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            rm -rf /tmp/check-ponwrt
             echo "Detected configs: $CONFIG_LIST"
             echo "configs=$CONFIG_LIST" >> "$GITHUB_OUTPUT"
           else
@@ -81,20 +82,20 @@ jobs:
 
       - name: Clone pbs05/ponwrt and luci-theme-argon
         run: |
-          git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
-          rm -rf ponwrt/.git
-          git clone --depth=1 https://github.com/jerrykuku/luci-theme-argon.git ponwrt/package/luci-theme-argon
-          rm -rf ponwrt/package/luci-theme-argon/.git
+          git clone --depth=1 https://github.com/pbs05/ponwrt.git /tmp/pw
+          rm -rf /tmp/pw/.git
+          git clone --depth=1 https://github.com/jerrykuku/luci-theme-argon.git /tmp/pw/package/luci-theme-argon
+          rm -rf /tmp/pw/package/luci-theme-argon/.git
 
       - name: Update and install feeds
         run: |
-          cd ponwrt
+          cd /tmp/pw
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Apply ${{ matrix.config_name }}.config with Chinese and Argon theme
         run: |
-          cd ponwrt
+          cd /tmp/pw
           cp "configs/${{ matrix.config_name }}.config" .config
           cat << 'EOF' >> .config
           CONFIG_PACKAGE_luci=y
@@ -121,7 +122,7 @@ jobs:
 
       - name: Download sources, compile, rename outputs, and clean all junk
         run: |
-          cd ponwrt
+          cd /tmp/pw
           make download -j8
           find dl -size -1024c -exec rm -f {} \; || true
           make -j$(nproc) || make -j1 V=s
@@ -136,12 +137,12 @@ jobs:
             fi
           done
 
-          mkdir -p ../release-files/${{ matrix.config_name }}
+          mkdir -p "${{ github.workspace }}/release-files/${{ matrix.config_name }}"
           find bin/targets -type f \( -name "*-sysupgrade.bin" -o -name "*.itb" -o -name "sha256sums" \) \
-            -exec cp {} ../release-files/${{ matrix.config_name }}/ \;
+            -exec cp {} "${{ github.workspace }}/release-files/${{ matrix.config_name }}/" \;
 
-          rm -rf dl/* build_dir staging_dir bin/* tmp/* /tmp/* /var/tmp/*
-          ls -la ../release-files/${{ matrix.config_name }}
+          rm -rf /tmp/pw /var/tmp/*
+          ls -la "${{ github.workspace }}/release-files/${{ matrix.config_name }}"
           df -h
 
       - name: Upload build artifacts
