@@ -41,7 +41,6 @@ jobs:
 
           if [ "$SHOULD_BUILD" = "true" ]; then
             git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
-            ls -la ponwrt/configs
             CONFIG_LIST=$(find ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
             echo "Detected configs: $CONFIG_LIST"
             echo "configs=$CONFIG_LIST" >> "$GITHUB_OUTPUT"
@@ -80,17 +79,18 @@ jobs:
             libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget jq
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
-      - name: Clone pbs05/ponwrt
+      - name: Clone pbs05/ponwrt and luci-theme-argon
         run: |
           git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
           rm -rf ponwrt/.git
+          git clone --depth=1 https://github.com/jerrykuku/luci-theme-argon.git ponwrt/package/luci-theme-argon
+          rm -rf ponwrt/package/luci-theme-argon/.git
 
       - name: Update and install feeds
         run: |
           cd ponwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          df -h
 
       - name: Apply ${{ matrix.config_name }}.config with Chinese and Argon theme
         run: |
@@ -100,7 +100,6 @@ jobs:
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
-          CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-theme-argon=y
           CONFIG_PACKAGE_rpcd=y
           CONFIG_PACKAGE_rpcd-mod-luci=y
@@ -108,19 +107,19 @@ jobs:
           CONFIG_PACKAGE_uhttpd-mod-ubus=y
           EOF
           make defconfig
-          grep -E "CONFIG_PACKAGE_luci-theme-|CONFIG_PACKAGE_luci-i18n-base-zh-cn" .config || true
+          grep -E "CONFIG_PACKAGE_luci-theme-argon=|CONFIG_PACKAGE_luci-i18n-base-zh-cn=" .config
+          grep -q "^CONFIG_PACKAGE_luci-theme-argon=y" .config
 
           mkdir -p files/etc/uci-defaults
           cat << 'EOF' > files/etc/uci-defaults/zz-99-custom-luci
           uci set luci.main.lang='zh_cn'
           uci set luci.main.mediaurlbase='/luci-static/argon'
-          uci set luci.themes.Argon='/luci-static/argon'
           uci commit luci
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/zz-99-custom-luci
 
-      - name: Download sources, compile, rename outputs, and clean build junk
+      - name: Download sources, compile, rename outputs, and clean all junk
         run: |
           cd ponwrt
           make download -j8
@@ -141,7 +140,7 @@ jobs:
           find bin/targets -type f \( -name "*-sysupgrade.bin" -o -name "*.itb" -o -name "sha256sums" \) \
             -exec cp {} ../release-files/${{ matrix.config_name }}/ \;
 
-          rm -rf dl/* build_dir/target-* build_dir/host* tmp/* /tmp/* /var/tmp/*
+          rm -rf dl/* build_dir staging_dir bin/* tmp/* /tmp/* /var/tmp/*
           ls -la ../release-files/${{ matrix.config_name }}
           df -h
 
@@ -162,7 +161,7 @@ jobs:
         with:
           path: all-artifacts
 
-      - name: Flatten release files with config prefix
+      - name: Collect release files without config prefix
         run: |
           mkdir -p final-release
           for dir in all-artifacts/ponwrt-*; do
@@ -170,7 +169,12 @@ jobs:
             cfg=$(basename "$dir" | sed 's/^ponwrt-//')
             for f in "$dir"/*; do
               [ -f "$f" ] || continue
-              cp "$f" "final-release/${cfg}-$(basename "$f")"
+              base=$(basename "$f")
+              if [ "$base" = "sha256sums" ]; then
+                cp "$f" "final-release/${cfg}-sha256sums"
+              else
+                cp "$f" "final-release/$base"
+              fi
             done
           done
           ls -la final-release
@@ -184,4 +188,10 @@ jobs:
             Automated build for pbs05/ponwrt
             upstream_sha: ${{ needs.check-upstream.outputs.upstream_sha }}
           files: final-release/*
-          fail_on_unmatched_files: false
+          fail-on-unmatched-files: false
+
+      - name: Clean release staging directories
+        if: always()
+        run: |
+          rm -rf all-artifacts final-release /tmp/* /var/tmp/*
+          df -h
