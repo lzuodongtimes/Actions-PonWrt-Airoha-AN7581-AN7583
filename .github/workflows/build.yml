@@ -41,7 +41,18 @@ jobs:
 
           if [ "$SHOULD_BUILD" = "true" ]; then
             git clone --depth=1 https://github.com/pbs05/ponwrt.git /tmp/check-ponwrt
-            CONFIG_LIST=$(find /tmp/check-ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            # 只编 an7581 / an7583 两个整机配置；
+            # release.config 只是几个包的追加片段，没有 CONFIG_TARGET_*，
+            # 单独编会退到默认 mediatek/filogic 目标，内核 kconfig 交互提问直接失败
+            ALLOWED="an7581 an7583"
+            KEEP=""
+            for c in $ALLOWED; do
+              f="/tmp/check-ponwrt/configs/$c.config"
+              if [ -f "$f" ] && grep -q "^CONFIG_TARGET_air" "$f"; then
+                KEEP="$KEEP $c"
+              fi
+            done
+            CONFIG_LIST=$(echo $KEEP | tr ' ' '\n' | jq -R -s -c 'split("\n") | map(select(length > 0))')
             rm -rf /tmp/check-ponwrt
             echo "Detected configs: $CONFIG_LIST"
             echo "configs=$CONFIG_LIST" >> "$GITHUB_OUTPUT"
@@ -142,17 +153,35 @@ jobs:
             done
           fi
 
+          # 上游 feed 里 fkwnopd / luci-app-fkwnopd 的 Config.in 互相 select / depends，
+          # kconfig 会报 recursive dependency detected 让整个 defconfig 失败；
+          # 这两个包跟固件毫无关系，删目录后重新生成 kconfig 元数据即可
+          find /tmp/pw/feeds /tmp/pw/package/feeds -maxdepth 5 -name "*fkwnopd*" -exec rm -rf {} + 2>/dev/null || true
+          rm -rf /tmp/pw/tmp/.config-package.in /tmp/pw/tmp/.packageinfo
+
           make defconfig
           grep -E "^CONFIG_TARGET_DEVICE_airoha_an758[13]_DEVICE_.*=y" .config
+          grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_luci-theme-" .config
 
       - name: Download sources, compile, collect outputs, and clean all junk
         run: |
           cd /tmp/pw
           make download -j8
           find dl -size -1024c -exec rm -f {} \; || true
-          make -j$(nproc) || make -j1 V=s
+          make -j$(nproc) || yes "" | make -j1 V=s
 
-          # 文件名沿用源码默认（本来就是 immortalwrt- 开头），不做任何重命名
+          # 源码默认前缀来自 VERSION_DIST=PonWrt，产物是 ponwrt-*，这里改名成 immortalwrt-*
+          find bin/targets -type f -name "ponwrt-*" | while read -r f; do
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            new_base="${base/#ponwrt/immortalwrt}"
+            mv "$f" "$dir/$new_base"
+          done
+          # 目录里的 sha256sums 同步改文件名（文件内容没变，校验值仍然有效）
+          find bin/targets -name sha256sums -type f | while read -r s; do
+            sed -i 's/ponwrt-/immortalwrt-/g' "$s"
+          done
+
           mkdir -p "${{ github.workspace }}/release-files/${{ matrix.config_name }}"
           find bin/targets -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.fip" -o -name "sha256sums" \) \
             -exec cp {} "${{ github.workspace }}/release-files/${{ matrix.config_name }}/" \;
