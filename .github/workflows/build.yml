@@ -6,32 +6,60 @@ on:
     branches: [ main ]
     paths:
       - '.github/workflows/build.yml'
+  schedule:
+    - cron: '0 */6 * * *'
 
 permissions:
   contents: write
 
 jobs:
-  detect-configs:
+  check-upstream:
     runs-on: ubuntu-24.04
     outputs:
-      configs: ${{ steps.scan.outputs.configs }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      configs: ${{ steps.check.outputs.configs }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
     steps:
-      - name: Scan all configs in pbs05/ponwrt
-        id: scan
+      - name: Check pbs05/ponwrt updates and scan configs
+        id: check
         run: |
-          git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
-          ls -la ponwrt/configs
-          CONFIG_LIST=$(find ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          echo "Detected configs: $CONFIG_LIST"
-          echo "configs=$CONFIG_LIST" >> "$GITHUB_OUTPUT"
+          UPSTREAM_SHA=$(git ls-remote https://github.com/pbs05/ponwrt.git HEAD | awk '{print $1}')
+          echo "Latest pbs05/ponwrt HEAD: $UPSTREAM_SHA"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+
+          LAST_SHA=$(gh release list --repo "${{ github.repository }}" --limit 10 --json tagName,body \
+            | jq -r '.[] | select(.tagName | startswith("ponwrt-all-")) | .body' \
+            | grep -oE 'upstream_sha:[[:space:]]*[0-9a-f]{40}' | head -n1 | awk '{print $2}' || true)
+          echo "Last built upstream SHA: ${LAST_SHA:-none}"
+
+          if [ "${{ github.event_name }}" != "schedule" ] || [ -z "$LAST_SHA" ] || [ "$UPSTREAM_SHA" != "$LAST_SHA" ]; then
+            SHOULD_BUILD="true"
+          else
+            SHOULD_BUILD="false"
+          fi
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+          if [ "$SHOULD_BUILD" = "true" ]; then
+            git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
+            ls -la ponwrt/configs
+            CONFIG_LIST=$(find ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "Detected configs: $CONFIG_LIST"
+            echo "configs=$CONFIG_LIST" >> "$GITHUB_OUTPUT"
+          else
+            echo "No upstream changes detected. Skipping firmware build."
+            echo "configs=[]" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build:
-    needs: detect-configs
+    needs: check-upstream
+    if: ${{ needs.check-upstream.outputs.should_build == 'true' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        config_name: ${{ fromJson(needs.detect-configs.outputs.configs) }}
+        config_name: ${{ fromJson(needs.check-upstream.outputs.configs) }}
     steps:
       - name: Checkout config repo
         uses: actions/checkout@v4
@@ -125,8 +153,8 @@ jobs:
           if-no-files-found: warn
 
   release:
-    needs: [detect-configs, build]
-    if: always()
+    needs: [check-upstream, build]
+    if: always() && needs.check-upstream.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Download all firmware artifacts
@@ -152,5 +180,8 @@ jobs:
         with:
           tag_name: ponwrt-all-v${{ github.run_number }}
           name: PonWrt All Supported Hardware Build #${{ github.run_number }}
+          body: |
+            Automated build for pbs05/ponwrt
+            upstream_sha: ${{ needs.check-upstream.outputs.upstream_sha }}
           files: final-release/*
           fail_on_unmatched_files: false
