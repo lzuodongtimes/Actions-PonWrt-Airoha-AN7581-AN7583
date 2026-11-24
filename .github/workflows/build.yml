@@ -80,12 +80,16 @@ jobs:
             libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget jq
           sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
-      - name: Clone pbs05/ponwrt
+      - name: Clone pbs05/ponwrt and Aurora theme
         run: |
           # 保留 .git：version.mk 依赖 git describe 生成版本号，删掉会让 base-files 变成 xxx-unknown
           git clone --depth=1 https://github.com/pbs05/ponwrt.git /tmp/pw
           git -C /tmp/pw tag -f v0.0.0-build 2>/dev/null || true
           git -C /tmp/pw describe --tags --always
+
+          # luci-theme-aurora：仓库内已带编译好的静态资源，直接当本地 package 用，无需 npm 构建
+          git clone --depth=1 https://github.com/eamonxg/luci-theme-aurora.git /tmp/pw/package/luci-theme-aurora
+          rm -rf /tmp/pw/package/luci-theme-aurora/.git
 
       - name: Update and install feeds
         run: |
@@ -93,12 +97,15 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Apply ${{ matrix.config_name }}.config
+      - name: Apply ${{ matrix.config_name }}.config with Aurora theme
         run: |
           cd /tmp/pw
           cp "configs/${{ matrix.config_name }}.config" .config
+          # 源码默认选的是 Argon，这里换成 Aurora
+          sed -i 's/^CONFIG_PACKAGE_luci-theme-argon=y/# CONFIG_PACKAGE_luci-theme-argon is not set/' .config
+          grep -q "CONFIG_PACKAGE_luci-theme-aurora" .config || echo "CONFIG_PACKAGE_luci-theme-aurora=y" >> .config
           make defconfig
-          grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_luci-theme-argon=" .config
+          grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_luci-theme-" .config
 
       - name: Download sources, compile, rename outputs, and clean all junk
         run: |
