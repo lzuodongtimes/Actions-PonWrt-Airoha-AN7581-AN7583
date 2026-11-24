@@ -1,4 +1,4 @@
-name: Build PonWrt for AN7583 (XG-040G-MF)
+name: Build PonWrt for All Supported Hardware
 
 on:
   workflow_dispatch: {}
@@ -11,16 +11,36 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  detect-configs:
     runs-on: ubuntu-24.04
+    outputs:
+      configs: ${{ steps.scan.outputs.configs }}
+    steps:
+      - name: Scan all configs in pbs05/ponwrt
+        id: scan
+        run: |
+          git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
+          ls -la ponwrt/configs
+          CONFIG_LIST=$(find ponwrt/configs -maxdepth 1 -name '*.config' -exec basename {} .config \; | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "Detected configs: $CONFIG_LIST"
+          echo "configs=$CONFIG_LIST" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect-configs
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        config_name: ${{ fromJson(needs.detect-configs.outputs.configs) }}
     steps:
       - name: Checkout config repo
         uses: actions/checkout@v4
 
-      - name: Free up disk space
+      - name: Free up disk space before build
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
-            /usr/local/share/boost /opt/pipx /root/.cache
+            /usr/local/share/boost /opt/pipx /root/.cache /tmp/* /var/tmp/*
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
           docker system prune -af --volumes || true
           df -h
 
@@ -29,13 +49,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential bzip2 ccache clang cmake cpio curl \
             device-tree-compiler flex g++ gawk gcc-multilib g++-multilib gettext git \
-            libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget
+            libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget jq
+          sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
 
       - name: Clone pbs05/ponwrt
         run: |
           git clone --depth=1 https://github.com/pbs05/ponwrt.git ponwrt
           rm -rf ponwrt/.git
-          ls -la ponwrt/configs || true
 
       - name: Update and install feeds
         run: |
@@ -44,62 +64,93 @@ jobs:
           ./scripts/feeds install -a
           df -h
 
-      - name: Apply an7583.config with Chinese and built-in Argon theme
+      - name: Apply ${{ matrix.config_name }}.config with Chinese and Argon theme
         run: |
           cd ponwrt
-          if [ -f configs/an7583.config ]; then
-            cp configs/an7583.config .config
-          else
-            echo "Warning: configs/an7583.config not found, fallback to an7581.config"
-            cp configs/an7581.config .config
-          fi
+          cp "configs/${{ matrix.config_name }}.config" .config
           cat << 'EOF' >> .config
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
           CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-theme-argon=y
-          CONFIG_PACKAGE_luci-i18n-argon-config-zh-cn=y
           CONFIG_PACKAGE_rpcd=y
           CONFIG_PACKAGE_rpcd-mod-luci=y
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_uhttpd-mod-ubus=y
           EOF
           make defconfig
+          grep -E "CONFIG_PACKAGE_luci-theme-|CONFIG_PACKAGE_luci-i18n-base-zh-cn" .config || true
 
           mkdir -p files/etc/uci-defaults
-          cat << 'EOF' > files/etc/uci-defaults/99-custom-luci
+          cat << 'EOF' > files/etc/uci-defaults/zz-99-custom-luci
           uci set luci.main.lang='zh_cn'
           uci set luci.main.mediaurlbase='/luci-static/argon'
+          uci set luci.themes.Argon='/luci-static/argon'
           uci commit luci
           exit 0
           EOF
-          chmod +x files/etc/uci-defaults/99-custom-luci
+          chmod +x files/etc/uci-defaults/zz-99-custom-luci
 
-      - name: Download sources and compile firmware
+      - name: Download sources, compile, rename outputs, and clean build junk
         run: |
           cd ponwrt
           make download -j8
           find dl -size -1024c -exec rm -f {} \; || true
           make -j$(nproc) || make -j1 V=s
-          rm -rf dl/*
-          find bin/targets -maxdepth 4 -type f || true
+
+          find bin/targets -type f -name "ponwrt*" | while read -r f; do
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            new_base="${base/#ponwrt/immortalwrt}"
+            mv "$f" "$dir/$new_base"
+            if [ -f "$dir/sha256sums" ]; then
+              sed -i "s/\b${base}\b/${new_base}/g" "$dir/sha256sums"
+            fi
+          done
+
+          mkdir -p ../release-files/${{ matrix.config_name }}
+          find bin/targets -type f \( -name "*-sysupgrade.bin" -o -name "*.itb" -o -name "sha256sums" \) \
+            -exec cp {} ../release-files/${{ matrix.config_name }}/ \;
+
+          rm -rf dl/* build_dir/target-* build_dir/host* tmp/* /tmp/* /var/tmp/*
+          ls -la ../release-files/${{ matrix.config_name }}
           df -h
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ponwrt-an7583-xg-040g-mf
-          path: ponwrt/bin/targets/airoha/an7583/*
+          name: ponwrt-${{ matrix.config_name }}
+          path: release-files/${{ matrix.config_name }}/*
           if-no-files-found: warn
 
-      - name: Release firmware
+  release:
+    needs: [detect-configs, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all firmware artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Flatten release files with config prefix
+        run: |
+          mkdir -p final-release
+          for dir in all-artifacts/ponwrt-*; do
+            [ -d "$dir" ] || continue
+            cfg=$(basename "$dir" | sed 's/^ponwrt-//')
+            for f in "$dir"/*; do
+              [ -f "$f" ] || continue
+              cp "$f" "final-release/${cfg}-$(basename "$f")"
+            done
+          done
+          ls -la final-release
+
+      - name: Release all hardware firmware
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: an7583-mf-v${{ github.run_number }}
-          name: PonWrt AN7583 (XG-040G-MF) Build #${{ github.run_number }}
-          files: |
-            ponwrt/bin/targets/airoha/an7583/*-sysupgrade.bin
-            ponwrt/bin/targets/airoha/an7583/*.itb
-            ponwrt/bin/targets/airoha/an7583/sha256sums
+          tag_name: ponwrt-all-v${{ github.run_number }}
+          name: PonWrt All Supported Hardware Build #${{ github.run_number }}
+          files: final-release/*
           fail_on_unmatched_files: false
