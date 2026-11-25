@@ -136,17 +136,90 @@ jobs:
           fi
 
           # 2) 桥接流量能进 conntrack 的前提：CONFIG_BRIDGE_NETFILTER
-          #    nf_conntrack_bridge 里 VLAN/PPPoE 的解析代码（675 系列补丁）被
-          #    #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER) 包着，不开这项时桥接的
-          #    PPPoE 帧根本进不了 conntrack，nft flow offload 永远建不出条目，
-          #    结果是千兆桥接全部逐包走 CPU（实测 busy ~47%）。
-          #    只改内核选项、不装 kmod-br-netfilter 包，避免把桥流量二次送进
-          #    iptables 规则集（bridge-nf-call-* 保持默认 0）。
-          sed -i 's/^# CONFIG_BRIDGE_NETFILTER is not set$/CONFIG_BRIDGE_NETFILTER=y/' .config
-          grep -q "^CONFIG_BRIDGE_NETFILTER=y" .config || echo "CONFIG_BRIDGE_NETFILTER=y" >> .config
-          sed -i 's/^# CONFIG_NF_DEFRAG_IPV4 is not set$/CONFIG_NF_DEFRAG_IPV4=y/' .config
-          grep -q "^CONFIG_NF_DEFRAG_IPV4=y" .config || echo "CONFIG_NF_DEFRAG_IPV4=y" >> .config
-          grep -E "^CONFIG_BRIDGE_NETFILTER=y|^CONFIG_NF_DEFRAG_IPV4=y" .config
+          #    nf_conntrack_bridge 的 VLAN/PPPoE 解析（675-02）和 netfilter_bridge.h
+          #    里的 nf_bridge_info 新字段都被 #if IS_ENABLED(...) 包着，不开这项
+          #    桥接的 PPPoE 帧进不了 conntrack，nft flow offload 建不出条目，
+          #    千兆桥接全部逐包走 CPU（实测 busy ~47%）。
+          #    必须改内核配置 target/linux/generic/config-6.18：
+          #    顶层 .config 只装包/目标选项，写进去会被后面的 make defconfig 丢掉。
+          #    取 =m 且不装 kmod-br-netfilter 包：模块编出来但不加载，运行行为不变。
+          KCONF=/tmp/pw/target/linux/generic/config-6.18
+          sed -i 's/^# CONFIG_BRIDGE_NETFILTER is not set$/CONFIG_BRIDGE_NETFILTER=m/' "$KCONF"
+          grep -q "^CONFIG_BRIDGE_NETFILTER=m" "$KCONF" || echo "CONFIG_BRIDGE_NETFILTER=m" >> "$KCONF"
+          sed -i 's/^# CONFIG_NF_DEFRAG_IPV4 is not set$/CONFIG_NF_DEFRAG_IPV4=y/' "$KCONF"
+          grep -q "^CONFIG_NF_DEFRAG_IPV4=y" "$KCONF" || echo "CONFIG_NF_DEFRAG_IPV4=y" >> "$KCONF"
+          grep -E "^CONFIG_BRIDGE_NETFILTER=m|^CONFIG_NF_DEFRAG_IPV4=y" "$KCONF"
+
+          # 3) 桥接 PPPoE 光有内核开关还不够：675-02 的 nf_ct_bridge_inner()
+          #    只在“已存在非默认 zone 的 ct 模板”时才去剥 VLAN/PPPoE 头，
+          #    zone 是默认值时 PPPoE 帧被标成 IP_CT_UNTRACKED，流表照样是空的。
+          #    所以在 fw4 生成的 bridge 表里加一条 prerouting 链设 zone；
+          #    优先级 -450 早于内核 nf_conntrack_bridge 的 hook，才能被它看到。
+          FWPATCH=/tmp/pw/package/network/config/firewall4/patches/001-add-bridge-flowtable-support.patch
+          python3 - "$FWPATCH" <<'PY'
+          import re, sys
+          path = sys.argv[1]
+          s = open(path).read()
+          if 'ct zone set 3130' in s:
+              print('zone rule already present, skip')
+              sys.exit(0)
+          anchor = '+\tchain forward {\n'
+          assert s.count(anchor) == 1, 'anchor not unique'
+          add = ('+\n'
+                 '+\tchain prerouting {\n'
+                 '+\t\ttype filter hook prerouting priority -450; policy accept;\n'
+                 '+\t\tiifname { "lan1", "pon0" } ct zone set 3130\n'
+                 '+\t}\n'
+                 '+\n')
+          n_add = add.count('+')
+          s = s.replace(anchor, add + anchor)
+          lines = s.split('\n')
+
+          def hunks_of(lines):
+              out = []
+              i = 0
+              while i < len(lines):
+                  m = re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', lines[i])
+                  if not m:
+                      i += 1; continue
+                  exp_old = int(m.group(2) if m.group(2) is not None else 1)
+                  exp_new = int(m.group(4) if m.group(4) is not None else 1)
+                  j = i + 1; old = new = 0
+                  while j < len(lines) and (old < exp_old or new < exp_new):
+                      l = lines[j]
+                      if l.startswith('\\'):
+                          j += 1; continue
+                      if l.startswith(' ') or l.startswith('-'):
+                          old += 1
+                      if l.startswith(' ') or l.startswith('+'):
+                          new += 1
+                      j += 1
+                  out.append([i, m, old, new, j])
+                  i = j
+              return out
+
+          hs = hunks_of(lines)
+          target = None
+          for k, h in enumerate(hs):
+              if any(anchor.strip('+').strip() in lines[x] for x in range(h[0], h[4])):
+                  target = k; break
+          assert target is not None, 'hunk containing anchor not found'
+          m = hs[target][1]
+          newnew = int(m.group(4) if m.group(4) is not None else 1) + n_add
+          lines[hs[target][0]] = re.sub(r'^(@@ -\d+(?:,\d+)? \+\d+,)\d+( @@.*)$',
+                                        lambda mm: mm.group(1) + str(newnew) + mm.group(2),
+                                        lines[hs[target][0]])
+          s = '\n'.join(lines)
+          hs2 = hunks_of(s.split('\n'))
+          for h in hs2:
+              exp_old = int(h[1].group(2) if h[1].group(2) is not None else 1)
+              exp_new = int(h[1].group(4) if h[1].group(4) is not None else 1)
+              if (h[2], h[3]) != (exp_old, exp_new):
+                  print('MISMATCH', h[1].group(0), h[2], h[3]); sys.exit(1)
+          open(path, 'w').write(s)
+          print(f'OK: +{n_add} lines, hunks={len(hs2)}, all counts consistent')
+          PY
+          grep -q 'ct zone set 3130' "$FWPATCH" || { echo "fw4 patch 注入失败"; exit 1; }
 
 
           # md 也导出 preloader / bl31-uboot 文件（源码默认只给 mf 声明了 ARTIFACTS）
