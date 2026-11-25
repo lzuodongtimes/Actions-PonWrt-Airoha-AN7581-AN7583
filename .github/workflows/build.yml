@@ -1,4 +1,4 @@
-name: Build PonWrt for All Supported Hardware
+name: Build PonWrt XG-040G-MD / XG-040G-MF
 
 on:
   workflow_dispatch: {}
@@ -160,7 +160,8 @@ jobs:
           rm -rf /tmp/pw/tmp/.config-package.in /tmp/pw/tmp/.packageinfo
 
           make defconfig
-          grep -E "^CONFIG_TARGET_DEVICE_airoha_an758[13]_DEVICE_.*=y" .config
+          echo "选中的设备："
+          grep -E "^CONFIG_TARGET_DEVICE_airoha_an758[13]_DEVICE_.*=y" .config | sed 's/=y//'
           grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_luci-theme-" .config
 
       - name: Download sources, compile, collect outputs, and clean all junk
@@ -231,9 +232,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ponwrt-all-v${{ github.run_number }}
-          name: PonWrt All Supported Hardware Build #${{ github.run_number }}
+          name: PonWrt XG-040G MD/MF Build #${{ github.run_number }}
           body: |
-            Automated build for pbs05/ponwrt
+            Automated build for pbs05/ponwrt (only Nokia XG-040G-MD / XG-040G-MF)
             upstream_sha: ${{ needs.check-upstream.outputs.upstream_sha }}
           files: final-release/*
           fail-on-unmatched-files: false
@@ -241,5 +242,5 @@ jobs:
       - name: Clean release staging directories
         if: always()
         run: |
-          rm -rf all-artifacts final-release /tmp/* /var/tmp/*
+          rm -rf all-artifacts final-release || true
           df -h
