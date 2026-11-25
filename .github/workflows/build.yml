@@ -135,6 +135,19 @@ jobs:
             sed -i '/^config defaults/,/^config zone/ s|^\(\toption flow_offloading\s*1\)$|\1\n\toption flow_offloading_hw\t1|' "$FW_CONF"
           fi
 
+          # 2) 桥接流量能进 conntrack 的前提：CONFIG_BRIDGE_NETFILTER
+          #    nf_conntrack_bridge 里 VLAN/PPPoE 的解析代码（675 系列补丁）被
+          #    #if IS_ENABLED(CONFIG_BRIDGE_NETFILTER) 包着，不开这项时桥接的
+          #    PPPoE 帧根本进不了 conntrack，nft flow offload 永远建不出条目，
+          #    结果是千兆桥接全部逐包走 CPU（实测 busy ~47%）。
+          #    只改内核选项、不装 kmod-br-netfilter 包，避免把桥流量二次送进
+          #    iptables 规则集（bridge-nf-call-* 保持默认 0）。
+          sed -i 's/^# CONFIG_BRIDGE_NETFILTER is not set$/CONFIG_BRIDGE_NETFILTER=y/' .config
+          grep -q "^CONFIG_BRIDGE_NETFILTER=y" .config || echo "CONFIG_BRIDGE_NETFILTER=y" >> .config
+          sed -i 's/^# CONFIG_NF_DEFRAG_IPV4 is not set$/CONFIG_NF_DEFRAG_IPV4=y/' .config
+          grep -q "^CONFIG_NF_DEFRAG_IPV4=y" .config || echo "CONFIG_NF_DEFRAG_IPV4=y" >> .config
+          grep -E "^CONFIG_BRIDGE_NETFILTER=y|^CONFIG_NF_DEFRAG_IPV4=y" .config
+
 
           # md 也导出 preloader / bl31-uboot 文件（源码默认只给 mf 声明了 ARTIFACTS）
           sed -i '/^define Device\/nokia_xg-040g-md-ubi-images/,/^endef/{/^endef/{s|^endef|  ARTIFACT/preloader.bin := an7581-preloader nokia_xg-040g-md\n  ARTIFACT/bl31-uboot.fip := an7581-bl31-uboot nokia_xg-040g-md\n  ARTIFACTS := preloader.bin bl31-uboot.fip\nendef|}}' /tmp/pw/target/linux/airoha/image/an7581.mk
