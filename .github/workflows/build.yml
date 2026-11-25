@@ -163,6 +163,13 @@ jobs:
             echo "LuCI 插件页面已移除"
           fi
 
+          # 去掉 LuCI 的「交换机 VLAN 配置」菜单（只删菜单项，保留视图文件，避免其它页面引用时加载失败）
+          LUCI_NET=/tmp/pw/feeds/luci/modules/luci-mod-network
+          if [ -f "$LUCI_NET/root/usr/share/luci/menu.d/luci-mod-network.json" ]; then
+            python3 -c "import json;p='$LUCI_NET/root/usr/share/luci/menu.d/luci-mod-network.json';d=json.load(open(p));[d.pop(k,None) for k in ('admin/network/switch','admin/network/switch-vlan')];json.dump(d,open(p,'w'),indent=2,ensure_ascii=False)"
+            echo "已移除交换机 VLAN 菜单"
+          fi
+
           # 上游 feed 里 fkwnopd / luci-app-fkwnopd 的 Config.in 互相 select / depends，
           # kconfig 会报 recursive dependency detected 让整个 defconfig 失败；
           # 这两个包跟固件毫无关系，删目录后重新生成 kconfig 元数据即可
