@@ -155,6 +155,14 @@ jobs:
               echo "CONFIG_TARGET_DEVICE_PACKAGES_${TARGET}_DEVICE_${d}=\"\"" >> .config
             done
           fi
+          # 去掉 LuCI 自带的「插件」页面（luci-mod-system 的 Plugins 菜单与视图）
+          LUCI_SYS=/tmp/pw/feeds/luci/modules/luci-mod-system
+          if [ -f "$LUCI_SYS/root/usr/share/luci/menu.d/luci-mod-system.json" ]; then
+            python3 -c "import json;p='$LUCI_SYS/root/usr/share/luci/menu.d/luci-mod-system.json';d=json.load(open(p));d.pop('admin/system/plugins',None);json.dump(d,open(p,'w'),indent=2,ensure_ascii=False)"
+            rm -f "$LUCI_SYS/htdocs/luci-static/resources/view/system/plugins.js"
+            echo "LuCI 插件页面已移除"
+          fi
+
           # 上游 feed 里 fkwnopd / luci-app-fkwnopd 的 Config.in 互相 select / depends，
           # kconfig 会报 recursive dependency detected 让整个 defconfig 失败；
           # 这两个包跟固件毫无关系，删目录后重新生成 kconfig 元数据即可
