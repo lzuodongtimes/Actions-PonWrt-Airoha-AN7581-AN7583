@@ -1,11 +1,11 @@
-name: Build PonWrt XG-040G-MD / XG-040G-MF
+name: Build PonWrt for XG-040G-MD / XG-040G-MF
 
 on:
   workflow_dispatch: {}
   push:
     branches: [ main ]
     paths:
-      - '.github/workflows/build.yml'
+      - '.github/workflows/build-md-mf.yml'
   schedule:
     - cron: '0 */6 * * *'
 
@@ -41,9 +41,9 @@ jobs:
 
           if [ "$SHOULD_BUILD" = "true" ]; then
             git clone --depth=1 https://github.com/pbs05/ponwrt.git /tmp/check-ponwrt
-            # 只编 an7581 / an7583 两个整机配置；
-            # release.config 只是几个包的追加片段，没有 CONFIG_TARGET_*，
-            # 单独编会退到默认 mediatek/filogic 目标，内核 kconfig 交互提问直接失败
+            # 只保留带完整 target 的整机配置（an7581 / an7583）；
+            # release.config 只是几个包的追加片段，没有 CONFIG_TARGET_*，单独编会退到默认
+            # mediatek/filogic 目标，内核 kconfig 交互提问直接失败
             ALLOWED="an7581 an7583"
             KEEP=""
             for c in $ALLOWED; do
@@ -128,6 +128,9 @@ jobs:
           sed -i 's/^CONFIG_PACKAGE_luci-theme-argon=y/# CONFIG_PACKAGE_luci-theme-argon is not set/' .config
           grep -q "CONFIG_PACKAGE_luci-theme-aurora" .config || echo "CONFIG_PACKAGE_luci-theme-aurora=y" >> .config
 
+          # md 也导出 preloader / bl31-uboot 文件（源码默认只给 mf 声明了 ARTIFACTS）
+          sed -i '/^define Device\/nokia_xg-040g-md-ubi-images/,/^endef/{/^endef/{s|^endef|  ARTIFACT/preloader.bin := an7581-preloader nokia_xg-040g-md\n  ARTIFACT/bl31-uboot.fip := an7581-bl31-uboot nokia_xg-040g-md\n  ARTIFACTS := preloader.bin bl31-uboot.fip\nendef|}}' /tmp/pw/target/linux/airoha/image/an7581.mk
+
           # 只保留 xg-040g-md（an7581 目标）和 xg-040g-mf（an7583 目标）两个设备
           case "${{ matrix.config_name }}" in
             an7581)
@@ -152,7 +155,6 @@ jobs:
               echo "CONFIG_TARGET_DEVICE_PACKAGES_${TARGET}_DEVICE_${d}=\"\"" >> .config
             done
           fi
-
           # 上游 feed 里 fkwnopd / luci-app-fkwnopd 的 Config.in 互相 select / depends，
           # kconfig 会报 recursive dependency detected 让整个 defconfig 失败；
           # 这两个包跟固件毫无关系，删目录后重新生成 kconfig 元数据即可
@@ -160,9 +162,9 @@ jobs:
           rm -rf /tmp/pw/tmp/.config-package.in /tmp/pw/tmp/.packageinfo
 
           make defconfig
-          echo "选中的设备："
-          grep -E "^CONFIG_TARGET_DEVICE_airoha_an758[13]_DEVICE_.*=y" .config | sed 's/=y//'
+          grep -E "^CONFIG_TARGET_DEVICE_airoha_an758[13]_DEVICE_.*=y" .config
           grep -E "^CONFIG_LUCI_LANG_zh_Hans=|^CONFIG_PACKAGE_luci-theme-" .config
+
 
       - name: Download sources, compile, collect outputs, and clean all junk
         run: |
@@ -232,9 +234,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ponwrt-all-v${{ github.run_number }}
-          name: PonWrt XG-040G MD/MF Build #${{ github.run_number }}
+          name: PonWrt All Supported Hardware Build #${{ github.run_number }}
           body: |
-            Automated build for pbs05/ponwrt (only Nokia XG-040G-MD / XG-040G-MF)
+            Automated build for pbs05/ponwrt
             upstream_sha: ${{ needs.check-upstream.outputs.upstream_sha }}
           files: final-release/*
           fail-on-unmatched-files: false
