@@ -2,8 +2,6 @@ name: Build PonWrt for All Supported Hardware (author source, unmodified kernel)
 
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: '0 */6 * * *'
 
 concurrency:
   group: ponwrt-all-stock
