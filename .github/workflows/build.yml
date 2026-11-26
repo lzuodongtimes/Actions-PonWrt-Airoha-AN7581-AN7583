@@ -396,9 +396,7 @@ jobs:
           find bin/targets -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.fip" -o -name "sha256sums" \) \
             -exec cp {} "${{ github.workspace }}/release-files/${{ matrix.config_name }}/" \;
 
-          # 只清本次编译产生的中间产物
-          rm -rf build_dir/ staging_dir/ logs/ bin/ dl/ tmp/ .config.old 2>/dev/null || true
-          rm -rf /tmp/pw /var/tmp/*
+          # 中间产物先不删：下一步要读 build_dir 里打补丁后的内核源码树
           ls -la "${{ github.workspace }}/release-files/${{ matrix.config_name }}"
           df -h
 
@@ -408,6 +406,9 @@ jobs:
           KDIR=$(find build_dir -maxdepth 4 -type d -name "linux-6.18.60" | head -1)
           [ -n "$KDIR" ] || { echo "::error::找不到 linux-6.18.60 构建目录"; exit 1; }
           echo "内核目录: $KDIR"
+          echo "--- 补丁标记（便于排查）---"
+          grep -n "offset == PPPOE_SES_HLEN" "$KDIR/net/bridge/netfilter/nf_conntrack_bridge.c" || echo "(未找到 675-02 翻转标记)"
+          grep -n "ETH_P_PPP_SES" "$KDIR/net/netfilter/nft_chain_filter.c" | head -3 || echo "(未找到 bridge 解析补丁标记)"
           grep -q "offset == PPPOE_SES_HLEN && ret == NF_ACCEPT" "$KDIR/net/bridge/netfilter/nf_conntrack_bridge.c" \
             || { echo "::error::675-02 的 skb->protocol 翻转没有进入内核源码树"; exit 1; }
           grep -q "eth_hdr(skb)->h_proto == htons(ETH_P_PPP_SES)" "$KDIR/net/netfilter/nft_chain_filter.c" \
@@ -421,6 +422,13 @@ jobs:
           grep -Eq "^CONFIG_NF_TABLES_BRIDGE=" "$KDIR/.config" || echo "::warning::NF_TABLES_BRIDGE 未在 config 中出现"
           ls -l "$KDIR/net/netfilter/nft_chain_filter.o" "$KDIR/net/bridge/netfilter/nf_conntrack_bridge.o" 2>/dev/null || true
           echo "内核补丁与开关校验通过"
+
+      - name: Clean build tree
+        if: always()
+        run: |
+          rm -rf /tmp/pw/build_dir /tmp/pw/staging_dir /tmp/pw/logs /tmp/pw/bin /tmp/pw/dl /tmp/pw/tmp 2>/dev/null || true
+          rm -rf /tmp/pw /var/tmp/* 2>/dev/null || true
+          df -h
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
