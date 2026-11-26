@@ -2,6 +2,8 @@ name: Build PonWrt for All Supported Hardware (author source, unmodified kernel)
 
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: '0 */6 * * *'
 
 concurrency:
   group: ponwrt-all-stock
@@ -25,8 +27,9 @@ jobs:
           echo "Latest pbs05/ponwrt HEAD: $UPSTREAM_SHA"
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
 
-          LAST_SHA=$(gh release list --repo "${{ github.repository }}" --limit 10 --json tagName,body \
-            | jq -r '.[] | select(.tagName | startswith("ponwrt-stock-")) | .body' \
+          # 注意：release list 只返回列表级字段，取不到 body；必须用 API 逐条读 release 正文
+          LAST_SHA=$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=30" \
+            --jq '.[] | select(.tag_name | startswith("ponwrt-stock-")) | .body' 2>/dev/null \
             | grep -oE 'upstream_sha:[[:space:]]*[0-9a-f]{40}' | head -n1 | awk '{print $2}' || true)
           echo "Last built upstream SHA: ${LAST_SHA:-none}"
 
