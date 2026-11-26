@@ -403,8 +403,11 @@ jobs:
       - name: Verify patched kernel is really in the build tree
         run: |
           cd /tmp/pw
-          KDIR=$(find build_dir -maxdepth 4 -type d -name "linux-6.18.60" | head -1)
-          [ -n "$KDIR" ] || { echo "::error::找不到 linux-6.18.60 构建目录"; exit 1; }
+          # 必须取目标固件内核（target-*/linux-airoha_*/linux-6.18.60），
+          # 不能取工具链那份 build_dir/toolchain-*/linux-6.18.60：
+          # 后者是精简的 headers 配置，配置项与固件无关，会误判。
+          KDIR=$(find build_dir -maxdepth 4 -type d -name "linux-6.18.60" -path "*target-*" | head -1)
+          [ -n "$KDIR" ] || { echo "::error::找不到目标内核构建目录，候选如下"; find build_dir -maxdepth 4 -type d -name "linux-6.18.60"; exit 1; }
           echo "内核目录: $KDIR"
           echo "--- 补丁标记（便于排查）---"
           grep -n "offset == PPPOE_SES_HLEN" "$KDIR/net/bridge/netfilter/nf_conntrack_bridge.c" || echo "(未找到 675-02 翻转标记)"
@@ -413,9 +416,19 @@ jobs:
             || { echo "::error::675-02 的 skb->protocol 翻转没有进入内核源码树"; exit 1; }
           grep -q "eth_hdr(skb)->h_proto == htons(ETH_P_PPP_SES)" "$KDIR/net/netfilter/nft_chain_filter.c" \
             || { echo "::error::bridge 解析补丁没有进入内核源码树"; exit 1; }
-          if grep -q "^CONFIG_BRIDGE_NETFILTER=" "$KDIR/.config"; then
-            echo "::error::CONFIG_BRIDGE_NETFILTER 被启用（br_netfilter 会抢走翻转协议的 PPPoE 帧）"; exit 1
+          BRNF=$(grep -m1 "^CONFIG_BRIDGE_NETFILTER=" "$KDIR/.config" || true)
+          echo "BRIDGE_NETFILTER 实际值: ${BRNF:-未设置}"
+          BRNF_PKG=$(grep -m1 "^CONFIG_PACKAGE_kmod-br-netfilter=" /tmp/pw/.config || true)
+          echo "PACKAGE_kmod-br-netfilter: ${BRNF_PKG:-未选中}"
+          if [ "$BRNF_PKG" = "CONFIG_PACKAGE_kmod-br-netfilter=y" ]; then
+            echo "::error::kmod-br-netfilter 被打进固件，模块会自动加载，桥接会被抢包"; exit 1
           fi
+          case "$BRNF" in
+            "CONFIG_BRIDGE_NETFILTER=y")
+              echo "::error::br_netfilter 被编进内核本体，它会抢走翻转协议的 PPPoE 帧"; exit 1 ;;
+            "CONFIG_BRIDGE_NETFILTER=m")
+              echo "::warning::br_netfilter 以模块形式存在；刷机前先确认设备上没有 /proc/sys/net/bridge" ;;
+          esac
           grep -Eq "^CONFIG_NF_CONNTRACK_ZONES=y$" "$KDIR/.config" || { echo "::error::CONFIG_NF_CONNTRACK_ZONES 未生效（ct zone set 会失败）"; exit 1; }
           grep -Eq "^CONFIG_NF_CONNTRACK_BRIDGE=[my]$" "$KDIR/.config" || { echo "::error::CONFIG_NF_CONNTRACK_BRIDGE 未生效"; exit 1; }
           grep -Eq "^CONFIG_NF_DEFRAG_IPV4=[my]$" "$KDIR/.config" || { echo "::error::CONFIG_NF_DEFRAG_IPV4 未生效"; exit 1; }
